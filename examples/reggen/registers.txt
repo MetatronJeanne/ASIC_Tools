@@ -1,0 +1,9 @@
+| Module | Offset | BitRange | RegName | Reset | Access | Interface | Owner | Description |
+|--------|--------|----------|---------|-------|--------|-----------|-------|-------------|
+| DEMO | 0x00 | [7:0] | control | 0x12 | RW | demo_control_if:ctrl0 | - | First control channel. |
+| DEMO | 0x00 | [31:8] | Reserved | 0x0 | RO | - | - | Unused bits read as zero. |
+| DEMO | 0x04 | [7:0] | hw_status | 0x0 | RO | demo_status_if:status | - | Hardware status input. |
+| DEMO | 0x08 | [7:0] | clear_flags | 0xff | W1C | - | - | Software write-one-to-clear example, no hardware event update. |
+| DEMO | 0x0c | [7:0] | set_flags | 0x0 | W1S | - | - | Software write-one-to-set example, no hardware event update. |
+| DEMO | 0x10 | [47:0] | wide_value | 0x123456789abc | RW | - | - | Two-word value, low word at 0x10 and high 16 bits at 0x14. |
+| DEMO | 0x18 | [7:0] | control | 0x12 | RW | demo_control_if:ctrl1 | - | Independent second control channel. |
