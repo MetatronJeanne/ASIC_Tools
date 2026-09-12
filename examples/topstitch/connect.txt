@@ -1,0 +1,10 @@
+[GLOBAL]
+CORE_MODULE = demo_top
+WRAPPER_MODULE = demo_wrapper
+FILELIST = files.f
+
+[INSTANCES]
+u_pair = data_pair #(W=16)
+
+[AUTO_CONNECT]
+AUTO_TOP u_pair
