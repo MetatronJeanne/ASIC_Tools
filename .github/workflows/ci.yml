@@ -1,0 +1,72 @@
+name: Tool Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generators:
+    name: Generators / ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+        python: ['3.9', '3.13']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: shogo82148/actions-setup-perl@ac3202722f5744e62a8fa3af3e1aaaebb08861f3 # v1
+        with:
+          perl-version: '5.40'
+          distribution: strawberry
+          enable-modules-cache: false
+      - name: Python version
+        run: python --version
+      - name: Perl version
+        run: perl -V
+      - name: Generator regressions
+        run: python -B tests/test_tools.py
+
+  hdl-examples:
+    name: HDL examples / Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+      - uses: shogo82148/actions-setup-perl@ac3202722f5744e62a8fa3af3e1aaaebb08861f3 # v1
+        with:
+          perl-version: '5.40'
+          enable-modules-cache: false
+      - uses: YosysHQ/setup-oss-cad-suite@aefa8397bbf8fc6670a0a62af9805a89738f3cde # v3
+        with:
+          version: '2026-09-11'
+          github-token: ${{ github.token }}
+      - name: Python version
+        run: python --version
+      - name: Perl version
+        run: perl -V
+      - name: slang version
+        run: slang --version
+      - name: Verilator version
+        run: verilator --version
+      - name: Elaborate and simulate original examples
+        run: python -B tests/run_examples.py
