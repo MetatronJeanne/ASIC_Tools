@@ -34,8 +34,12 @@ def main():
                 raise RuntimeError(f"Command failed: {command}\n{result.stdout}\n{result.stderr}")
             return result.stdout + result.stderr
 
+        wrapper = work / 'examples/reggen/rtl/demo_regs.sv'
+        original_wrapper = wrapper.read_bytes()
         run([args.perl, str(ROOT / 'tools/reggen/gen_reg_inc.pl'),
-             '--config', 'examples/reggen/config.json', '--inject'])
+             '--config', 'examples/reggen/config.json'])
+        if wrapper.read_bytes() != original_wrapper:
+            raise RuntimeError('Register generation modified the handwritten wrapper')
         run([sys.executable, '-B', str(ROOT / 'tools/topstitcher/stitch_top.py'),
              '--spec', 'examples/topstitch/connect.txt', '--output-core', 'build/demo_top.sv',
              '--report', 'build/top_audit.txt', '--strict'])

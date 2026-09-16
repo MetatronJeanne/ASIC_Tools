@@ -30,7 +30,7 @@ outputs under `build/` rather than in the tool's source directory.
 1. Describe the observed behavior and the expected result with a minimal example.
 2. Add a failing regression test before fixing a bug where practical.
 3. Keep changes limited to one behavior. Preserve deterministic generation,
-   explicit injection, and existing outputs on validation failure.
+   handwritten RTL, and existing outputs on validation failure.
 4. Update both guides and `CHANGELOG.md` when the CLI, configuration, generated
    interface or supported language subset changes.
 5. Run the checks below and record the actual tool versions and results.

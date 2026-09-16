@@ -21,6 +21,8 @@ module demo_regs_tb;
         apb.paddr = addr;
         apb.pwdata = value;
         @(negedge clk);
+        if (!wr && apb.prdata !== value)
+            $fatal(1, "Setup-phase read %h: got %h, expected %h", addr, apb.prdata, value);
         apb.penable = 1;
         @(posedge clk);
         #1;
@@ -62,7 +64,28 @@ module demo_regs_tb;
         transfer(0, 'h10, 'hdeadbeef);
         transfer(0, 'h14, 'hface);
         if (wide_value !== 48'hfacedeadbeef) $fatal(1, "Wide output mismatch");
+        // Unselected writes must not change state; read data holds while idle.
+        apb.pwrite = 1;
+        apb.penable = 1;
+        apb.paddr = 0;
+        apb.pwdata = 0;
+        repeat (2) @(negedge clk);
+        if (ctrl0.control !== 8'hab || apb.prdata !== 32'hface)
+            $fatal(1, "Idle hold failure");
+        // A write setup phase alone must not update registers.
+        apb.psel = 1;
+        apb.penable = 0;
+        @(negedge clk);
+        if (ctrl0.control !== 8'hab) $fatal(1, "Write occurred during setup");
+        apb.psel = 0;
         transfer(0, 'hfc, 'h0);
+        transfer(0, 'h00, 'hab);
+        #1;
+        reset_n = 0;
+        #1;
+        if (apb.prdata !== 0 || ctrl0.control !== 8'h12 || ctrl1.control !== 8'h12 ||
+            clear_flags !== 8'hff || set_flags !== 0 || wide_value !== 48'h123456789abc)
+            $fatal(1, "Asynchronous reset failure");
         $display("REGGEN_EXAMPLE_PASS");
         $finish;
     end

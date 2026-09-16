@@ -44,7 +44,7 @@ when that is the Python 3 executable on your system.
 
 ## Register Generator
 
-Generate macros, register interfaces, a C header and a Markdown address map:
+Generate module includes, macros, register interfaces, a C header and a Markdown address map:
 
 ```sh
 perl tools/reggen/gen_reg_inc.pl --config examples/reggen/config.json
@@ -55,43 +55,78 @@ two control instances, read-only status, W1C/W1S fields and a 48-bit register.
 Addresses in the table and RTL are relative offsets. The configured base address
 is used by the C header and documentation, not subtracted by the generated RTL.
 
-RTL injection is disabled by default. Preview an injection:
+RTL is never rewritten. Preview the output paths without publishing files:
 
 ```sh
-perl tools/reggen/gen_reg_inc.pl --config examples/reggen/config.json --inject --dry-run
+perl tools/reggen/gen_reg_inc.pl --config examples/reggen/config.json --dry-run
 ```
 
-To apply it, omit `--dry-run`. This rewrites the marked regions of
-`examples/reggen/rtl/demo_regs.sv`. The regression runner below runs the complete
-example in a temporary copy without modifying the repository template.
+To generate the files, omit `--dry-run`. Each module with non-reserved fields
+gets `<MODULE>_reg_port.svh` and `<MODULE>_reg_logic.svh`, using the uppercase
+table module name, not the wrapper filename. Includes default to the directory
+of `--output`; `--include-dir` / JSON `include_dir` overrides that directory.
+Reserved-only modules emit no includes; a table with no non-reserved fields is
+rejected. Outputs have deterministic content and no timestamps or include guards,
+so the same includes can be used in more than one wrapper in a compilation unit.
 
 Configuration paths are relative to the JSON file; CLI paths are relative to
 the current directory. CLI options take precedence. The `modules` object maps
-each module to an RTL basename and a base address. Unspecified bases are zero.
-Injection requires an explicit RTL root and exactly one matching file per module.
-
-The default marker pairs are `//reggen_port_on/off`,
-`//reggen_default_on/off`, `//reggen_write_on/off` and `//reggen_read_on/off`.
-Each marker must occupy its own line; all four non-nested pairs are required.
-Missing, duplicate or misordered markers fail before replacing any output.
+each module to a base address. Unspecified bases are zero; no RTL mapping or
+source search root is required. Files for modules removed from the table are not
+automatically deleted; clean obsolete generated files from your build directory.
 
 `--workdir` is a parent directory: each invocation creates its own child and
 cleans up only that child. `--keep-temp` retains it. Generated files are staged
-until generation and injection validation finish, then replaced individually.
+until all generation and validation finish, then replaced individually.
 The complete set of replacements is not a cross-file atomic transaction.
 
 ### Project Integration
 
 Configure the following settings for each design:
 
-- `modules`: module names, RTL basenames and base addresses.
+- `modules`: uppercase table module names and base addresses.
 - `apb_interface`: bus signal prefix.
-- `marker_prefix`: the prefix before `port`, `default`, `write` and `read`.
-- Input/output paths, `rtlroot`, and `--inject` when modification is intended.
+- `clock` / `--clock`: rising-edge clock, default `clk`.
+- `reset_n` / `--reset-n`: asynchronous active-low reset, default `reset_n`.
+- Input/output paths, including optional `include_dir`.
 
-For example, a project using `//custom_regport_on` sets
-`"marker_prefix": "custom_reg"`. `--skip-inject` disables injection, and
-`--no-skip-inject` enables it. Run `--help` for the full option list.
+```systemverilog
+`include "reg_inc.v"
+module demo_regs (
+    input logic clk,
+    input logic reset_n,
+    demo_apb_if.s apb
+`include "DEMO_reg_port.svh"
+);
+    assign apb.pready = 1'b1;
+    assign apb.pslverr = 1'b0;
+`include "DEMO_reg_logic.svh"
+endmodule
+```
+
+Add the macro/include directories to the compiler include path (for example,
+`-Ibuild/reggen`) and compile the APB and generated register interface definitions
+before the wrapper. Do not compile `.svh` fragments as standalone sources.
+The port include supplies a leading comma on every declaration: place it after
+at least one handwritten port with no trailing comma. The logic include supplies
+complete `always_ff` blocks, not statements for insertion into an existing block.
+The wrapper owns `pready`/`pslverr` and must not also drive generated registers or
+`prdata`. A read-only module omits the write block.
+
+Writes occur on `psel && penable && pwrite`. Reads are registered on
+`psel && !pwrite` (including the setup phase), retaining the example's timing;
+`prdata` holds when idle and clears on reset or unmapped reads. Unused read bits
+are zero. The bus is 32 bits, uses module-relative addresses, and this logic
+does not gate transfers on `pready` or implement wait-state control.
+
+Migration: remove all four old marker pairs and their generated contents,
+replace the entire old reset/write/read blocks with the logic include, and move
+the port include to the end of the handwritten port list. Preserve any custom
+logic deliberately, without introducing multiple drivers. `--inject` and
+`--no-skip-inject` now fail with migration guidance. `--skip-inject` is a deprecated
+no-op; `rtlroot`, `rtl_file` (including module mappings), and `marker_prefix` are
+accepted only for compatibility and warn that they are ignored. Run `--help` for
+the full option list. Existing macro, interface, C header and map formats remain.
 
 W1C/W1S implement software updates only. Hardware event updates, their priority
 relative to software writes, byte strobes and multiword atomicity require

@@ -49,9 +49,9 @@ class RegisterTests(WorkspaceTest):
         self.config.write_text(json.dumps({
             "input": "registers.txt", "output": "out/reg_inc.v",
             "interface_output": "out/register_if.sv", "sim_header": "out/regs.h",
-            "map_output": "out/map.md", "rtlroot": "rtl", "workdir": "scratch",
-            "apb_interface": "bus", "marker_prefix": "reggen_",
-            "modules": {"DEMO": {"rtl_file": "demo_regs.sv", "base_addr": "0x2000"}}
+            "map_output": "out/map.md", "workdir": "scratch",
+            "apb_interface": "bus",
+            "modules": {"DEMO": {"base_addr": "0x2000"}}
         }), encoding="utf-8")
 
     def generate(self, *args):
@@ -83,41 +83,79 @@ class RegisterTests(WorkspaceTest):
         self.assertEqual((self.work / "out/reg_inc.v").read_text(), "previous valid output")
         self.assertEqual(sentinel.read_text(), "keep")
 
-    def test_injection_is_idempotent_and_preview_is_read_only(self):
-        preview = self.generate("--inject", "--dry-run")
+    def test_includes_are_idempotent_and_preview_is_read_only(self):
+        preview = self.generate("--dry-run")
         self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
         self.assertIn("PREVIEW", preview.stdout)
         self.assertEqual(self.source.read_text(), self.original)
         self.assertFalse((self.work / "out/reg_inc.v").exists())
-        first = self.generate("--inject")
+        self.assertIn("DEMO_reg_port.svh", preview.stdout)
+        self.assertIn("DEMO_reg_logic.svh", preview.stdout)
+        self.assertFalse((self.work / "out").exists())
+        first = self.generate()
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-        once = self.source.read_bytes()
-        self.assertIn(b"bus.pwdata", once)
-        self.assertEqual(self.generate("--inject").returncode, 0)
-        self.assertEqual(self.source.read_bytes(), once)
-
-    def test_missing_or_duplicate_markers_preserve_rtl_and_outputs(self):
-        for body in (self.original.replace("//reggen_read_off", "//missing"),
-                     self.original + "//reggen_read_on\n"):
-            with self.subTest(body=body):
-                self.source.write_text(body)
-                self.assertNotEqual(self.generate("--inject").returncode, 0)
-                self.assertEqual(self.source.read_text(), body)
-                self.assertFalse((self.work / "out/reg_inc.v").exists())
-
-    def test_ambiguous_rtl_target_is_rejected(self):
-        (self.rtl / "other").mkdir()
-        (self.rtl / "other/demo_regs.sv").write_text(self.original)
-        result = self.generate("--inject")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Ambiguous", result.stderr)
+        once = {p.name: p.read_bytes() for p in (self.work / "out").iterdir()}
+        self.assertIn(b"bus.pwdata", once["DEMO_reg_logic.svh"])
+        self.assertIn(b", output reg [7:0] cfg", once["DEMO_reg_port.svh"])
+        self.assertEqual(self.generate().returncode, 0)
+        self.assertEqual(once, {p.name: p.read_bytes() for p in (self.work / "out").iterdir()})
         self.assertEqual(self.source.read_text(), self.original)
 
-    def test_legacy_marker_and_bus_names_are_explicit_options(self):
-        self.source.write_text(self.original.replace("reggen_", "legacy_reg"))
-        result = self.generate("--inject", "--marker-prefix", "legacy_reg", "--apb-interface", "old_bus")
+    def test_removed_injection_flags_fail_before_publishing(self):
+        for flag in ("--inject", "--no-skip-inject"):
+            with self.subTest(flag=flag):
+                result = self.generate(flag)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("injection has been removed", result.stderr)
+                self.assertEqual(self.source.read_text(), self.original)
+                self.assertFalse((self.work / "out/reg_inc.v").exists())
+
+    def test_legacy_config_is_accepted_without_searching_or_writing_rtl(self):
+        config = json.loads(self.config.read_text())
+        config.update(rtlroot="missing", marker_prefix="legacy_reg")
+        config["modules"]["DEMO"]["rtl_file"] = "missing.sv"
+        self.config.write_text(json.dumps(config))
+        result = self.generate("--skip-inject")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("old_bus.pwdata", self.source.read_text())
+        self.assertIn("deprecated", result.stderr)
+        self.assertEqual(self.source.read_text(), self.original)
+
+    def test_include_paths_and_signals_support_config_and_cli_overrides(self):
+        config = json.loads(self.config.read_text())
+        config.update(include_dir="includes", clock="pclk", reset_n="preset_n")
+        self.config.write_text(json.dumps(config))
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("posedge pclk or negedge preset_n",
+                      (self.work / "includes/DEMO_reg_logic.svh").read_text())
+        result = self.generate("--include-dir", "override", "--clock", "other_clk",
+                               "--reset-n", "other_rst_n", "--apb-interface", "old_bus")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        logic = (self.work / "override/DEMO_reg_logic.svh").read_text()
+        self.assertIn("posedge other_clk or negedge other_rst_n", logic)
+        self.assertIn("old_bus.pwdata", logic)
+        for flag in ("--clock", "--reset-n"):
+            self.assertNotEqual(self.generate(flag, "bad;name").returncode, 0)
+
+    def test_read_only_and_multiple_modules_need_no_rtl_mapping(self):
+        self.table.write_text(HEADER +
+            "| DEMO | 0 | [7:0] | status | 0 | RO | status_if:state | - | |\n"
+            "| OTHER | 0 | [0] | enable | 1 | RW | - | - | |\n")
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        logic = (self.work / "out/DEMO_reg_logic.svh").read_text()
+        self.assertEqual(logic.count("always_ff"), 1)
+        self.assertNotIn("bus.pwdata", logic)
+        self.assertIn("state.status", logic)
+        self.assertIn(", status_if.s state", (self.work / "out/DEMO_reg_port.svh").read_text())
+        self.assertTrue((self.work / "out/OTHER_reg_port.svh").exists())
+        self.assertTrue((self.work / "out/OTHER_reg_logic.svh").exists())
+
+    def test_include_output_collision_preserves_all_outputs(self):
+        result = self.generate("--output", "out/DEMO_reg_port.svh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("aliases", result.stderr)
+        self.assertFalse((self.work / "out").exists())
 
     def test_invalid_reset_and_module_path_are_rejected(self):
         for row in ("| DEMO | 0 | [3:0] | cfg | 0x10 | RW | - | - | bad |\n",
@@ -144,11 +182,11 @@ class RegisterTests(WorkspaceTest):
         self.assertIn("Unknown config key", result.stderr)
         self.assertFalse((self.work / "out").exists())
 
-    def test_nested_markers_are_rejected(self):
+    def test_markers_are_not_inspected(self):
         body = self.original.replace("//reggen_port_off", "//reggen_default_on").replace(
             "//reggen_default_on\n// old default", "//reggen_port_off\n// old default")
         self.source.write_text(body)
-        self.assertNotEqual(self.generate("--inject").returncode, 0)
+        self.assertEqual(self.generate().returncode, 0)
         self.assertEqual(self.source.read_text(), body)
 
     def test_wide_resets_and_repeated_instance_macros(self):
