@@ -1,6 +1,9 @@
 # ASIC_Tools Changelog
 
-## Unreleased
+## v2.13 - First Public Release (2026-09-16)
+
+First tagged public release of ASIC_Tools, including Register Generator 2.13
+and TopStitcher.
 
 ### License
 
@@ -38,6 +41,8 @@
 
 ### Documentation and Checks
 
+- Document the pre-open-source scripts' use in a commercial ASIC project that
+  completed tape-out, separately from validation of the public version.
 - Add English and Chinese usage guides and contribution instructions for
   ASIC_Tools, covering configuration, supported syntax and testing.
 - Define Linux/Windows generator CI and a Linux HDL example job with pinned

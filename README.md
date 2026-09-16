@@ -6,6 +6,19 @@ ASIC_Tools collects, develops and maintains tools and scripts for ASIC
 development. It helps ASIC engineers debug designs, reduce repetitive work,
 and improve code quality and readability.
 
+## Pre-open-source / Production History
+
+ASIC_Tools grew out of scripts developed and maintained by MetatronJeanne for
+practical ASIC engineering work. Before open-sourcing, the author licensed these
+scripts for use in a commercial ASIC project that has completed tape-out.
+
+The public repository contains general-purpose tools and self-contained examples;
+it does not include the company's design RTL or project-specific inputs. This
+production history refers to the pre-open-source scripts. The public version
+includes subsequent changes, including the Register Generator's transition from
+in-place RTL injection to generated include files. Validation of the public
+version is covered by the [regression checks](#regression-checks) and CI.
+
 ## Tools
 
 | Tool | Purpose |
