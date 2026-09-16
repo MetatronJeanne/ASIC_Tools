@@ -4,12 +4,12 @@
   "interface_output": "../../build/reggen/register_if.sv",
   "sim_header": "../../build/reggen/regs.h",
   "map_output": "../../build/reggen/reg_map.md",
-  "rtlroot": "rtl",
+  "include_dir": "../../build/reggen",
   "apb_interface": "apb",
-  "marker_prefix": "reggen_",
+  "clock": "clk",
+  "reset_n": "reset_n",
   "modules": {
     "DEMO": {
-      "rtl_file": "demo_regs.sv",
       "base_addr": "0x2000"
     }
   }

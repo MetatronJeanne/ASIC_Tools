@@ -45,7 +45,7 @@ tests/
 perl tools/reggen/gen_reg_inc.pl --config examples/reggen/config.json
 ```
 
-默认只生成，不修改 RTL。四类输出位于 `build/reggen/`：
+生成器不再修改 RTL。输出位于 `build/reggen/`：
 
 | 文件 | 内容 |
 | --- | --- |
@@ -53,6 +53,12 @@ perl tools/reggen/gen_reg_inc.pl --config examples/reggen/config.json
 | `register_if.sv` | 寄存器 interface 定义 |
 | `regs.h` | 软件/验证使用的 C 宏 |
 | `reg_map.md` | 地址和字段文档 |
+| `<MODULE>_reg_port.svh` | 每模块一个端口 include，每项自带前导逗号 |
+| `<MODULE>_reg_logic.svh` | 每模块一个逻辑 include，包含完整的复位/读写过程块 |
+
+`MODULE` 使用表格中的大写模块名，与手写 RTL 文件名无关。包含非保留字段的模块
+才生成 include；全为保留字段的输入仍报错。文件内容稳定、不含时间戳和 include guard，
+同一编译单元的多个 wrapper 可重复包含。表格删除模块后，不自动删除旧生成文件。
 
 示例包含重复控制实例、只读状态、W1C/W1S、保留位和 48 位寄存器。
 表格和生成 RTL 使用相对偏移；配置的基地址用于 C 头文件和地址文档。
@@ -69,12 +75,13 @@ perl tools/reggen/gen_reg_inc.pl --config examples/reggen/config.json
 | `interface_output` | `--interface-output` | interface 文件 |
 | `sim_header` | `--sim-header` | C 头文件 |
 | `map_output` | `--map-output` | Markdown 文档 |
-| `rtlroot` | `--rtlroot` | 注入目标搜索目录 |
+| `include_dir` | `--include-dir` | 两个 include 的输出目录，默认与 `output` 同目录 |
 | `workdir` | `--workdir` | 每次运行使用的独立临时子目录的父目录 |
 | `apb_interface` | `--apb-interface` | APB 信号前缀，默认 `apb` |
-| `marker_prefix` | `--marker-prefix` | 注入标记前缀，默认 `reggen_` |
+| `clock` | `--clock` | 上升沿时钟，默认 `clk` |
+| `reset_n` | `--reset-n` | 异步低有效复位，默认 `reset_n` |
 | `map_description_width` | `--map-description-width` | 描述列换行宽度，默认 100 |
-| `modules` | 见下文 | 模块到 RTL 文件及基地址的映射 |
+| `modules` | 见下文 | 模块基地址配置 |
 
 JSON 中的路径相对于配置文件；命令行路径相对于当前目录。同一选项以命令行为准。
 未知配置键会报错。模块映射的键使用大写标识符，例如：
@@ -82,14 +89,13 @@ JSON 中的路径相对于配置文件；命令行路径相对于当前目录。
 ```json
 {
   "modules": {
-    "DEMO": {"rtl_file": "demo_regs.sv", "base_addr": "0x2000"}
+    "DEMO": {"base_addr": "0x2000"}
   }
 }
 ```
 
-`rtl_file` 是文件名，不是相对路径；注入时必须在 `rtlroot` 中恰好找到一个目标。
-未设置的基地址为零。使用 `--module DEMO --rtl-file demo_regs.sv --base-addr 0x2000`
-可覆盖单个模块映射，但不能省略 `--module`。
+不需要提供 RTL 文件映射或搜索目录。未设置的基地址为零。
+使用 `--module DEMO --base-addr 0x2000` 可覆盖单个模块基地址，但不能省略 `--module`。
 
 ### 输入格式
 
@@ -118,32 +124,43 @@ JSON 中的路径相对于配置文件；命令行路径相对于当前目录。
 先预览：
 
 ```sh
-perl tools/reggen/gen_reg_inc.pl --config examples/reggen/config.json --inject --dry-run
+perl tools/reggen/gen_reg_inc.pl --config examples/reggen/config.json --dry-run
 ```
 
-省略 `--dry-run` 后会改写示例配置指向的 `examples/reggen/rtl/demo_regs.sv`。
-后文的示例测试在临时副本中执行完整流程，不修改仓库模板。
+省略 `--dry-run` 后发布生成文件，不改写手写 RTL。后文的示例测试在临时副本中
+执行完整流程，同时检查 wrapper 未被生成器修改。
 
-目标文件必须包含四组独占一行的标记，每组恰好一对且不能嵌套：
+wrapper 写法如下，完整示例见 [demo_regs.sv](examples/reggen/rtl/demo_regs.sv)：
 
-```text
-//reggen_port_on
-//reggen_port_off
-//reggen_default_on
-//reggen_default_off
-//reggen_write_on
-//reggen_write_off
-//reggen_read_on
-//reggen_read_off
+```systemverilog
+`include "reg_inc.v"
+module demo_regs (
+    input logic clk,
+    input logic reset_n,
+    demo_apb_if.s apb
+`include "DEMO_reg_port.svh"
+);
+    assign apb.pready = 1'b1;
+    assign apb.pslverr = 1'b0;
+`include "DEMO_reg_logic.svh"
+endmodule
 ```
 
-四组标记分别放在端口、复位、写和读逻辑区域。
-完整外壳参考 [demo_regs.sv](examples/reggen/rtl/demo_regs.sv)。
-缺失、重复、错序标记或多个同名目标会阻止输出写入。
+编译时添加宏和 include 目录，例如 `-Ibuild/reggen`，并先编译 APB 和生成的寄存器
+interface 定义；不要把 `.svh` 当独立源文件编译。端口 include 必须放在至少一个
+手写端口后，前一个端口不留尾逗号。逻辑 include 放在模块体中，不能放进过程块。
+wrapper 负责 `pready`/`pslverr`，不要重复驱动生成的寄存器或 `prdata`。
 
-集成时配置地址、模块映射、APB 前缀、标记前缀和路径；需要修改 RTL 时添加
-`--inject`。例如标记为 `//custom_regport_on`，配置前缀为 `custom_reg`。
-`--skip-inject` 禁用注入，`--no-skip-inject` 启用注入。目标搜索范围由 `rtlroot` 指定。
+保留示例时序：写条件为 `psel && penable && pwrite`；读条件为 `psel && !pwrite`，
+包含 setup 阶段且读数据经过寄存。空闲保持读值，复位/未映射地址读零，未使用的读位为零。
+只读模块不生成写过程块。总线为 32 位，使用模块相对地址，不通过 `pready` 门控读写，
+也不自动实现等待状态。
+
+迁移时删除四组 marker 和旧生成内容，以逻辑 include 替换整个旧复位/读写过程块，
+将端口 include 放到手写端口列表末尾。原有自定义逻辑需明确保留，避免多驱动。
+`--inject` 和 `--no-skip-inject` 现在报错并给出迁移提示；`--skip-inject` 是弃用的空操作。
+旧 `rtlroot`、`rtl_file`（含模块映射）和 `marker_prefix` 仍可输入，但警告后忽略。
+原有 RTL 宏、interface、C 头文件和地址文档格式保持不变。
 
 临时文件放在每次运行独立的子目录，结束时只清理该子目录；`--keep-temp` 可保留检查。
 校验完成后才替换目标文件。多文件替换不是一个整体事务，写入过程中发生磁盘故障

@@ -16,10 +16,12 @@
 
 ### Register Generator
 
-- Add JSON configuration, help, explicit injection and read-only preview.
-- Replace project-specific defaults with configurable mappings, bus names and markers.
+- Add JSON configuration, help and read-only preview.
+- Replace marker-based RTL injection with stable per-module port and logic `.svh` files.
+- Add `include_dir`, `clock` and `reset_n` configuration and CLI overrides.
+- Preserve macro, interface, C header and map generation, including registered APB reads.
 - Use private temporary directories and stage output before replacing destination files.
-- Reject missing, duplicate and misordered markers and ambiguous RTL targets.
+- Never search for or rewrite handwritten RTL; migrate the example to two includes.
 - Fix 48-bit reset slicing and repeated-instance wide-register macro collisions.
 - Validate module identifiers and reset bounds; accept a UTF-8 BOM.
 - Remove timestamps and source-machine paths from generated interfaces/headers.
@@ -46,6 +48,9 @@
 
 ### Migration
 
-RTL injection is disabled by default and requires `--inject`. Integration
-settings include module mappings, paths, APB names and marker prefixes.
+RTL injection has been removed. Replace the four marker regions and their old
+process blocks with `<MODULE>_reg_port.svh` and `<MODULE>_reg_logic.svh` includes.
+`--inject` / `--no-skip-inject` report a migration error. `--skip-inject`,
+`rtlroot`, `rtl_file` and `marker_prefix` are deprecated compatibility options.
+Integration settings include base addresses, paths, APB, clock and reset names.
 See [the usage guide](README.md) for configuration details.

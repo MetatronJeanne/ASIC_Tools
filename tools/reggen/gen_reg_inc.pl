@@ -2,7 +2,7 @@
 # Copyright (c) 2026 MetatronJeanne
 # SPDX-License-Identifier: MIT
 ##########################################################################
-# Version: 2.12
+# Version: 2.13
 # Author: MetatronJeanne
 # Update: 
 # 2026/03/02 MetatronJeanne
@@ -39,7 +39,7 @@
 #			This is a register automation batch management script, which runs as follows:
 #					1.Ensure that Perl 5.14 or above is installed in your work environment.
 #					2.Provide a register table with --input or a JSON file with --config.
-#					3.Run --help for options. RTL injection requires explicit --inject.
+#					3.Run --help for options. Include generated port and logic files in RTL.
 #
 #	
 ##########################################################################
@@ -47,7 +47,6 @@ use strict;
 use warnings;
 use Text::ParseWords; # Perl core library, handling quotation marks and escape characters
 use Getopt::Long;
-use File::Find;
 use File::Path qw/mkpath rmtree/;
 use File::Temp qw/tempdir tempfile/;
 use File::Basename qw/dirname basename/;
@@ -63,12 +62,16 @@ use IO::Handle; # Import IO::Handle to support file handle flush method
 my ($input_file, $output_macro, $work_dir, $rtl_root, $keep_temp, $interface_output, $sim_header_output, $map_output);
 my ($default_module, $default_rtl_file, $default_base_addr, $skip_inject);
 my ($map_description_width, $config_file, $work_parent, $apb_interface, $marker_prefix, $dry_run, $help);
+my ($include_dir, $clock, $reset_n);
 my (@pending_outputs, @publish_files);
 GetOptions(
     'config=s'         => \$config_file,
     'help|h'           => \$help,
     'input=s'          => \$input_file,
     'output=s'         => \$output_macro,
+    'include-dir=s'    => \$include_dir,
+    'clock=s'          => \$clock,
+    'reset-n=s'        => \$reset_n,
     'workdir=s'        => \$work_parent,
     'rtlroot=s'        => \$rtl_root,
     'keep-temp'        => \$keep_temp,
@@ -94,25 +97,28 @@ Usage: perl gen_reg_inc.pl --input FILE [options]
 --config FILE             JSON configuration; paths are relative to FILE
 --input FILE              Register table (required without configuration)
 --output FILE             RTL macros (default: build/reggen/reg_inc.v)
+--include-dir DIR         MODULE_reg_port.svh / MODULE_reg_logic.svh
+                         (default: directory of --output)
+--clock NAME              Rising-edge clock (default: clk)
+--reset-n NAME            Asynchronous active-low reset (default: reset_n)
 --interface-output FILE   Register interfaces
 --sim-header FILE         C header
 --map-output FILE         Markdown register map
 --workdir DIR             Parent of a new, private temporary directory
 --keep-temp               Retain that private directory for inspection
---rtlroot DIR             RTL search root (required when injecting)
---module NAME             Module to override with --rtl-file / --base-addr
---rtl-file NAME           Exact RTL basename; ambiguous matches are errors
+--module NAME             Module to override with --base-addr
 --base-addr NUMBER        Absolute base address, decimal or hexadecimal
 --apb-interface NAME      Bus signal prefix (default: apb)
---marker-prefix NAME      Prefix before port/default/write/read (reggen_)
---inject                  Enable RTL injection (disabled by default)
---skip-inject             Generate only; --no-skip-inject also enables injection
+--rtlroot / --rtl-file / --marker-prefix   Deprecated; ignored with warning
+--inject / --no-skip-inject               Removed; report a migration error
+--skip-inject             Deprecated no-op; RTL is never rewritten
 --dry-run                 Validate and preview without publishing files
 --map-description-width N Description wrapping width (default: 100)
 --help                    Show this help
 
-CLI options override JSON. Existing projects must explicitly configure their
-addresses, bus name, marker prefix and RTL root. No parent project is assumed.
+CLI options override JSON. Include the port file after a handwritten port
+(no trailing comma); include the logic file in the module body. Load the RTL
+macros first. Handwritten RTL owns APB pready/pslverr; see the example wrapper.
 HELP
     exit 0;
 }
@@ -120,7 +126,7 @@ HELP
 my $config = {};
 my %path_options = (
     input => \$input_file, output => \$output_macro, workdir => \$work_parent,
-    rtlroot => \$rtl_root, interface_output => \$interface_output,
+    rtlroot => \$rtl_root, interface_output => \$interface_output, include_dir => \$include_dir,
     sim_header => \$sim_header_output, map_output => \$map_output,
 );
 if (defined $config_file) {
@@ -129,7 +135,7 @@ if (defined $config_file) {
     { local $/; $config = decode_json(<$cfg_fh>); }
     close $cfg_fh;
     die "[ERROR] Config must be a JSON object\n" unless ref($config) eq 'HASH';
-    my %allowed = map { $_ => 1 } (keys %path_options, qw/modules apb_interface marker_prefix map_description_width/);
+    my %allowed = map { $_ => 1 } (keys %path_options, qw/modules apb_interface marker_prefix map_description_width clock reset_n/);
     for my $key (keys %$config) {
         die "[ERROR] Unknown config key: $key\n" unless $allowed{$key};
         die "[ERROR] Config $key must be a scalar value\n"
@@ -140,12 +146,15 @@ if (defined $config_file) {
         ${$path_options{$key}} = File::Spec->rel2abs($config->{$key}, dirname($config_file));
     }
     $apb_interface //= $config->{apb_interface};
+    $clock //= $config->{clock};
+    $reset_n //= $config->{reset_n};
     $marker_prefix //= $config->{marker_prefix};
     $map_description_width //= $config->{map_description_width};
 }
 die "[ERROR] --input or config input is required; use --help\n" unless defined $input_file;
 die "[ERROR] Unexpected positional arguments: @ARGV\n" if @ARGV;
 $output_macro     //= File::Spec->catfile('build', 'reggen', 'reg_inc.v');
+$include_dir      //= dirname($output_macro);
 $interface_output //= File::Spec->catfile('build', 'reggen', 'register_if.sv');
 $sim_header_output //= File::Spec->catfile('build', 'reggen', 'regs.h');
 $map_output       //= File::Spec->catfile('build', 'reggen', 'reg_map.md');
@@ -154,20 +163,28 @@ $keep_temp        //= 0;
 $map_description_width //= 100;
 $default_rtl_file //= "";
 $default_base_addr //= "";
-$skip_inject      //= 1;
 $apb_interface    //= 'apb';
-$marker_prefix    //= 'reggen_';
+$clock           //= 'clk';
+$reset_n         //= 'reset_n';
 die "[ERROR] --module is required for mapping overrides\n"
-    if !defined($default_module) && ($default_rtl_file ne '' || $default_base_addr ne '');
-die "[ERROR] --rtlroot is required when injecting\n" if !$skip_inject && !defined $rtl_root;
+    if !defined($default_module) && $default_base_addr ne '';
+die "[ERROR] RTL injection has been removed; replace marker regions and their enclosing blocks with MODULE_reg_port.svh and MODULE_reg_logic.svh includes (see README).\n"
+    if defined($skip_inject) && !$skip_inject;
+warn "[WARN] --skip-inject is deprecated; RTL is never rewritten.\n" if defined $skip_inject;
+warn "[WARN] rtlroot, rtl_file and marker_prefix are deprecated and ignored; use generated includes.\n"
+    if defined($rtl_root) || $default_rtl_file ne '' || defined($marker_prefix);
 die "[ERROR] Invalid APB interface name\n" unless $apb_interface =~ /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
-die "[ERROR] Invalid marker prefix\n" unless $marker_prefix =~ /^[A-Za-z_][A-Za-z0-9_]*$/;
+for my $signal ($clock, $reset_n) {
+    die "[ERROR] Invalid clock/reset signal name: $signal\n"
+        unless $signal =~ /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+}
 die "[ERROR] --map-description-width must be a positive integer\n"
     unless $map_description_width =~ /^\d+$/ && $map_description_width > 0;
 
 # Convert to absolute paths (avoid relative path issues, including files not created yet)
 $input_file        = normalize_path($input_file) if defined $input_file;
 $output_macro      = normalize_path($output_macro) if defined $output_macro;
+$include_dir       = normalize_path($include_dir);
 $work_parent       = normalize_path($work_parent);
 $rtl_root          = normalize_path($rtl_root) if defined $rtl_root;
 $interface_output  = normalize_path($interface_output) if defined $interface_output;
@@ -175,9 +192,8 @@ $sim_header_output = normalize_path($sim_header_output) if defined $sim_header_o
 $map_output        = normalize_path($map_output) if defined $map_output;
 
 # Global data structures
-my @regs;               # Store split register info (for macro generation/RTL injection)
+my @regs;               # Store split register info (for macro/include generation)
 my @orig_regs;          # Store original unsplit register info (for interface generation)
-my %module2rtl;         # Module-RTL file mapping: key=module name (UPPER CASE), value=RTL file name
 my %module_temp;        # Module temporary file handles: key=module name, value={def, wr, rd}
 my %module_base_addr;   # Store Base Address of each module
 die "[ERROR] Config modules must be an object\n" if exists($config->{modules}) && ref($config->{modules}) ne 'HASH';
@@ -186,6 +202,7 @@ for my $mod (keys %default_module_map) {
     die "[ERROR] Invalid config module: $mod (use uppercase identifiers)\n" unless $mod =~ /^[A-Z_][A-Z0-9_]*$/;
     my $mapping = $default_module_map{$mod};
     die "[ERROR] Mapping for $mod must be an object\n" unless ref($mapping) eq 'HASH';
+    warn "[WARN] modules.$mod.rtl_file is deprecated and ignored.\n" if exists $mapping->{rtl_file};
     for my $key (keys %$mapping) {
         die "[ERROR] Invalid mapping key for $mod: $key\n"
             unless $key =~ /^(rtl_file|base_addr)$/ && defined($mapping->{$key}) && !ref($mapping->{$key});
@@ -354,7 +371,6 @@ END {
         close $module_temp{$mod}->{def} if exists $module_temp{$mod}->{def};
         close $module_temp{$mod}->{wr}  if exists $module_temp{$mod}->{wr};
         close $module_temp{$mod}->{rd}  if exists $module_temp{$mod}->{rd};
-        close $module_temp{$mod}->{port} if exists $module_temp{$mod}->{port};
     }
     # Auto clean up temporary directory (unless --keep-temp is specified)
     unlink $_ for grep { -f $_ } @publish_files;
@@ -431,9 +447,8 @@ sub parse_input {
     my ($pending_row, $pending_line);
 
     my $override_mod = uc($default_module // '');
-    if ($default_rtl_file ne "" || $default_base_addr ne "") {
-        $default_module_map{$override_mod}->{rtl_file} = $default_rtl_file if $default_rtl_file ne "";
-        $default_module_map{$override_mod}->{base_addr} = $default_base_addr if $default_base_addr ne "";
+    if ($default_base_addr ne "") {
+        $default_module_map{$override_mod}->{base_addr} = $default_base_addr;
     }
 
     while (my $line = <$fh>) {
@@ -550,9 +565,7 @@ sub parse_input {
         die "[ERROR] Line $line_num: Register $raw_field attribute is illegal, only supports RW/RO/W1C/W1S\n" unless $attr =~ /^(RW|RO|W1C|W1S)$/;
 
         my $mapping = $default_module_map{$mod} // {};
-        $module2rtl{$mod} = $mapping->{rtl_file} if defined $mapping->{rtl_file};
         $module_base_addr{$mod} = normalize_offset_literal($mapping->{base_addr} // '0');
-        die "[ERROR] No RTL mapping for module $mod\n" if !$skip_inject && !defined $module2rtl{$mod};
 
         my $is_reserved = is_reserved_name($raw_field);
         my ($raw_name, $if_sig_name);
@@ -702,12 +715,9 @@ sub parse_input {
     @regs = sort { $a->{module} cmp $b->{module} || hex($a->{offset}) <=> hex($b->{offset}) || $a->{lsb} <=> $b->{lsb} } @regs;
     die "[ERROR] No register definitions parsed!\n" unless scalar @regs > 0;
 
-    foreach my $mod (keys %module2rtl) {
-        $module_base_addr{$mod} //= "0x00000000";
-    }
     print "[INFO] Input file parsing completed, total ".scalar(@regs)." original registers parsed\n";
     foreach my $mod_name (sort keys %module_base_addr) {
-        print "[INFO] Mapping: module=$mod_name, rtl=".($module2rtl{$mod_name} // "").", base=$module_base_addr{$mod_name}\n";
+        print "[INFO] Mapping: module=$mod_name, base=$module_base_addr{$mod_name}\n";
     }
 }
 
@@ -719,18 +729,15 @@ sub open_module_temp {
     my $def_temp = "$work_dir/${mod}_default.temp";
     my $wr_temp  = "$work_dir/${mod}_write.temp";
     my $rd_temp  = "$work_dir/${mod}_read.temp";
-    my $port_temp = "$work_dir/${mod}_port.temp"; # New: Port declaration temporary file
     # Open file handles (overwrite mode)
     open my $def_fh, '>', $def_temp or die "[ERROR] Failed to create default value temporary file: $! \n";
     open my $wr_fh,  '>', $wr_temp  or die "[ERROR] Failed to create write operation temporary file: $! \n";
     open my $rd_fh,  '>', $rd_temp  or die "[ERROR] Failed to create read operation temporary file: $! \n";
-    open my $port_fh, '>', $port_temp or die "[ERROR] Failed to create port declaration temporary file: $! \n";
     # Store handles
     $module_temp{$mod} = {
         def => $def_fh,
         wr  => $wr_fh,
-        rd  => $rd_fh,
-        port => $port_fh # New: Port handle
+        rd  => $rd_fh
     };
     print "[INFO] Created temporary files for module $mod\n";
 }
@@ -759,13 +766,6 @@ sub flush_close_temp_handles {
             $fh->flush(); # Fix: Use IO::Handle flush method
             close $fh;
             delete $module_temp{$mod}->{rd};
-        }
-        # Flush and close port declaration handle
-        if (exists $module_temp{$mod}->{port}) {
-            my $fh = $module_temp{$mod}->{port};
-            $fh->flush(); # Fix: Use IO::Handle flush method
-            close $fh;
-            delete $module_temp{$mod}->{port};
         }
     }
     print "[INFO] All temporary file handles flushed and closed, content written to disk!\n\n";
@@ -1112,7 +1112,7 @@ sub gen_port_declaration {
     # merge port and interface
     my %all_mods = map { $_ => 1 } (keys %mod_ports, keys %mod_interfaces);
 
-    foreach my $mod (keys %all_mods) {
+    foreach my $mod (sort keys %all_mods) {
         my @sorted_ports;
         
         # 1. unique port
@@ -1128,69 +1128,57 @@ sub gen_port_declaration {
         
         next unless scalar @sorted_ports > 0;
         
-        # declaration inject
-        my $port_content = join(",\n    ", @sorted_ports);
-        $port_content .= "," if $port_content ne ""; # add ","
-        
-        my $port_temp = "$work_dir/${mod}_port.temp";
-        open my $port_fh, '>', $port_temp; print $port_fh $port_content; close $port_fh;
-        #$module_temp{$mod}->{port} = $port_temp;
+        my $port_output = stage_output(File::Spec->catfile($include_dir, "${mod}_reg_port.svh"));
+        open my $port_fh, '>', $port_output or die "[ERROR] Cannot create port include: $!\n";
+        print $port_fh "// Auto-generated for $mod; do not edit. No include guard: module-local content.\n";
+        print $port_fh ", $_\n" for @sorted_ports;
+        close $port_fh or die "[ERROR] Cannot close port include: $!\n";
     }
 }
 
-# -------------------------- Core Subroutine: Find RTL Files --------------------------
-sub find_rtl_file {
-    my $rtl_name = shift;
-    die "[ERROR] RTL mapping must be a basename\n"
-        unless $rtl_name =~ /^[A-Za-z_][A-Za-z0-9_.-]*\.(?:sv|v)$/;
-    die "[ERROR] RTL root is not a directory: $rtl_root\n" unless -d $rtl_root;
-    my @found;
-    find({ no_chdir => 1, wanted => sub {
-        push @found, normalize_path($File::Find::name)
-            if -f $_ && basename($_) eq $rtl_name;
-    } }, $rtl_root);
-    die "[ERROR] Ambiguous RTL target $rtl_name: @found\n" if @found > 1;
-    return @found ? $found[0] : "";
-}
+# -------------------------- Core Subroutine: Generate Module Logic Includes --------------------------
+sub gen_logic_includes {
+    for my $mod (sort keys %module_temp) {
+        my %parts;
+        for my $section (qw/default write read/) {
+            open my $fh, '<', "$work_dir/${mod}_${section}.temp"
+                or die "[ERROR] Cannot read generated $section content: $!\n";
+            my $part = do { local $/; <$fh> } // '';
+            close $fh;
+            my $indent = $section eq 'default' ? '    ' : '        ';
+            $part =~ s/^/$indent/mg if $part ne '';
+            $parts{$section} = $part;
+        }
+        my $staged = stage_output(File::Spec->catfile($include_dir, "${mod}_reg_logic.svh"));
+        open my $out, '>', $staged or die "[ERROR] Cannot create logic include: $!\n";
+        print $out "// Auto-generated for $mod; do not edit. No include guard: module-local content.\n";
+        # A read-only module has no state to reset or write.
+        if ($parts{write} ne '') {
+            print $out <<"WRITE";
+always_ff @(posedge $clock or negedge $reset_n) begin
+    if (!$reset_n) begin
+$parts{default}    end else if ($apb_interface.psel && $apb_interface.penable && $apb_interface.pwrite) begin
+        case ($apb_interface.paddr)
+$parts{write}            default: ;
+        endcase
+    end
+end
 
-sub inject_rtl {
-    for my $mod (sort keys %module2rtl) {
-        my $path = find_rtl_file($module2rtl{$mod});
-        die "[ERROR] RTL file for module $mod not found\n" unless $path;
-        open my $fh, '<:raw', $path or die "[ERROR] Cannot read $path: $!\n";
-        my $content = do { local $/; <$fh> };
-        close $fh;
-        my $newline = $content =~ /\r\n/ ? "\r\n" : "\n";
-        $content =~ s/\r\n/\n/g;
-        my @markers = $content =~ /^[ \t]*\/\/\Q$marker_prefix\E(port|default|write|read)_(on|off)[ \t]*$/mg;
-        die "[ERROR] Expected exactly four marker pairs in $path\n" unless @markers == 16;
-        while (@markers) {
-            my ($section, $state, $end_section, $end_state) = splice(@markers, 0, 4);
-            die "[ERROR] Nested or misordered markers in $path\n"
-                unless $section eq $end_section && $state eq 'on' && $end_state eq 'off';
+WRITE
         }
-        for my $section (qw/port default write read/) {
-            my $on = $marker_prefix . $section . '_on';
-            my $off = $marker_prefix . $section . '_off';
-            my $on_count = () = $content =~ /^[ \t]*\/\/\Q$on\E[ \t]*$/mg;
-            my $off_count = () = $content =~ /^[ \t]*\/\/\Q$off\E[ \t]*$/mg;
-            die "[ERROR] Missing or duplicate $section markers in $path\n"
-                unless $on_count == 1 && $off_count == 1;
-            my $temp = "$work_dir/${mod}_${section}.temp";
-            open my $part_fh, '<:raw', $temp or die "[ERROR] Missing generated $section content: $!\n";
-            my $part = do { local $/; <$part_fh> } // '';
-            close $part_fh;
-            $part =~ s/\r\n/\n/g;
-            $part .= "\n" if $part ne '' && $part !~ /\n$/;
-            my $changed = $content =~ s/(^[ \t]*\/\/\Q$on\E[ \t]*\n).*?(^[ \t]*\/\/\Q$off\E[ \t]*$)/$1$part$2/sm;
-            die "[ERROR] Invalid $section marker region in $path\n" unless $changed == 1;
-        }
-        $content =~ s/\n/$newline/g;
-        my $staged = stage_output($path);
-        open my $out, '>:raw', $staged or die "[ERROR] Cannot stage RTL: $!\n";
-        print $out $content;
-        close $out or die "[ERROR] Cannot close staged RTL: $!\n";
-        print "[PREVIEW] $path\n$content\n" if $dry_run;
+        # Preserve setup-phase registered reads and idle hold from the example.
+        print $out <<"READ";
+always_ff @(posedge $clock or negedge $reset_n) begin
+    if (!$reset_n) begin
+        $apb_interface.prdata <= '0;
+    end else if ($apb_interface.psel && !$apb_interface.pwrite) begin
+        case ($apb_interface.paddr)
+$parts{read}            default: $apb_interface.prdata <= '0;
+        endcase
+    end
+end
+READ
+        close $out or die "[ERROR] Cannot close logic include: $!\n";
     }
 }
 
@@ -1493,7 +1481,7 @@ sub gen_sim_header {
 
 # -------------------------- Main Execution Flow --------------------------
 print "====================================\n";
-print "RTL Register Auto-Generation & Injection Tool\n";
+print "RTL Register Include Generation Tool\n";
 print "====================================\n";
 &pre_check;
 &parse_input;
@@ -1503,11 +1491,7 @@ print "====================================\n";
 &gen_rw_macro;
 &flush_close_temp_handles;
 &gen_port_declaration; # New: Generate port declarations for non-interface registers
-if ($skip_inject) {
-    print "[INFO] Generation-only mode; RTL code injection is disabled.\n";
-} else {
-    &inject_rtl;
-}
+&gen_logic_includes;
 &gen_register_interface; # Generate interface file
 &gen_reg_map;
 &gen_sim_header;
